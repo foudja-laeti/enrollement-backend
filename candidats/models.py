@@ -108,7 +108,28 @@ class Candidat(models.Model):
     departement = models.ForeignKey('Departement', on_delete=models.SET_NULL, null=True, blank=True, related_name='candidats')
     pays = models.CharField(max_length=100, default='Cameroun')
     boite_postale = models.CharField(max_length=50, blank=True, null=True)
+    date_validation = models.DateTimeField(null=True, blank=True)
+    valide_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='candidats_valides'
+    )
     
+    date_rejet = models.DateTimeField(null=True, blank=True)
+    rejete_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='candidats_rejetes'
+    )
+    motif_rejet = models.TextField(blank=True, null=True)
+    
+    class Meta:
+        db_table = 'candidats'
+        ordering = ['-created_at']
     # ✅ NOUVEAU : ForeignKeys pour configurations académiques
     bac = models.ForeignKey('configurations.Bac', on_delete=models.SET_NULL, null=True, blank=True, related_name='candidats')
     serie = models.ForeignKey('configurations.Serie', on_delete=models.SET_NULL, null=True, blank=True, related_name='candidats')

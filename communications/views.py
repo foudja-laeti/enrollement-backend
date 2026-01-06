@@ -43,3 +43,5 @@ class EpreuveViewSet(viewsets.ReadOnlyModelViewSet):
         response = FileResponse(epreuve.fichier.open('rb'))
         response['Content-Disposition'] = f'attachment; filename="{epreuve.slug}.pdf"'
         return response
+   
+    

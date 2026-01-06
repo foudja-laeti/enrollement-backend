@@ -207,3 +207,126 @@ class DocumentSerializer(serializers.ModelSerializer):
             'commentaire_verification', 'created_at'
         ]
         read_only_fields = ['id', 'created_at']
+
+# candidats/serializers.py (Ajouter ces serializers)
+
+class CandidatListSerializer(serializers.ModelSerializer):
+    """Serializer pour la liste des candidats"""
+    photo_url = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Candidat
+        fields = [
+            'id', 'matricule', 'nom', 'prenom', 'email', 'telephone',
+            'statut_dossier', 'photo_url', 'created_at', 'updated_at'
+        ]
+    
+    def get_photo_url(self, obj):
+        if obj.photo_path:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(
+                    settings.MEDIA_URL + obj.photo_path
+                )
+        return None
+
+
+class CandidatDetailSerializer(serializers.ModelSerializer):
+    """Serializer pour les détails complets d'un candidat"""
+    region_info = serializers.SerializerMethodField()
+    departement_info = serializers.SerializerMethodField()
+    bac_info = serializers.SerializerMethodField()
+    serie_info = serializers.SerializerMethodField()
+    mention_info = serializers.SerializerMethodField()
+    filiere_info = serializers.SerializerMethodField()
+    niveau_info = serializers.SerializerMethodField()
+    centre_examen_info = serializers.SerializerMethodField()
+    centre_depot_info = serializers.SerializerMethodField()
+    photo_url = serializers.SerializerMethodField()
+    documents = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Candidat
+        fields = '__all__'
+    
+    def get_region_info(self, obj):
+        if obj.region:
+            return {'id': obj.region.id, 'nom': obj.region.nom}
+        return None
+    
+    def get_departement_info(self, obj):
+        if obj.departement:
+            return {'id': obj.departement.id, 'nom': obj.departement.nom}
+        return None
+    
+    def get_bac_info(self, obj):
+        if obj.bac:
+            return {'id': obj.bac.id, 'libelle': obj.bac.libelle}
+        return None
+    
+    def get_serie_info(self, obj):
+        if obj.serie:
+            return {'id': obj.serie.id, 'libelle': obj.serie.libelle}
+        return None
+    
+    def get_mention_info(self, obj):
+        if obj.mention:
+            return {'id': obj.mention.id, 'libelle': obj.mention.libelle}
+        return None
+    
+    def get_filiere_info(self, obj):
+        if obj.filiere:
+            return {
+                'id': obj.filiere.id,
+                'code': obj.filiere.code,
+                'libelle': obj.filiere.libelle
+            }
+        return None
+    
+    def get_niveau_info(self, obj):
+        if obj.niveau:
+            return {'id': obj.niveau.id, 'libelle': obj.niveau.libelle}
+        return None
+    
+    def get_centre_examen_info(self, obj):
+        if obj.centre_examen:
+            return {'id': obj.centre_examen.id, 'nom': obj.centre_examen.nom}
+        return None
+    
+    def get_centre_depot_info(self, obj):
+        if obj.centre_depot:
+            return {'id': obj.centre_depot.id, 'nom': obj.centre_depot.nom}
+        return None
+    
+    def get_photo_url(self, obj):
+        if obj.photo_path:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(
+                    settings.MEDIA_URL + obj.photo_path
+                )
+        return None
+    
+    def get_documents(self, obj):
+        docs = Document.objects.filter(candidat=obj)
+        request = self.context.get('request')
+        return [
+            {
+                'id': doc.id,
+                'type': doc.type_document,
+                'nom': doc.nom_fichier,
+                'url': request.build_absolute_uri(
+                    settings.MEDIA_URL + doc.chemin_fichier
+                ) if request else None,
+                'is_verified': doc.is_verified,
+                'verified_at': doc.verified_at,
+                'commentaire': doc.commentaire_verification
+            }
+            for doc in docs
+        ]
+
+
+class DossierValidationSerializer(serializers.Serializer):
+    """Serializer pour valider/rejeter un dossier"""
+    motif = serializers.CharField(required=False, allow_blank=True)
+    action = serializers.ChoiceField(choices=['valider', 'rejeter'])

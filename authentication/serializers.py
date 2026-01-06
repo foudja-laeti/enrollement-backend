@@ -2,6 +2,7 @@
 from rest_framework import serializers
 from django.contrib.auth import authenticate, get_user_model
 from django.utils import timezone
+from configurations.models import Filiere
 from django.db import transaction
 from .models import CodeQuitus, ResponsableFiliere, UserActionLog
 from candidats.models import Candidat
@@ -50,9 +51,66 @@ class LoginSerializer(serializers.Serializer):
         
         data['user'] = user
         return data
-
-
+class CreateResponsableFiliereSerializer(serializers.Serializer):
+    nom = serializers.CharField(max_length=100)
+    prenom = serializers.CharField(max_length=100)
+    email = serializers.EmailField(max_length=191)
+    filiere_id = serializers.IntegerField()
+    password = serializers.CharField(write_only=True, required=False)  # Optionnel
+    
+    def validate_email(self, value):
+        if User.objects.filter(email=value).exists():
+            raise serializers.ValidationError("Cet email est déjà utilisé.")
+        return value
+    
+    def validate_filiere_id(self, value):
+        from configurations.models import Filiere
+        try:
+            filiere = Filiere.objects.get(id=value)
+        except Filiere.DoesNotExist:
+            raise serializers.ValidationError("Filière inexistante")
+        return value
+    
+    def create(self, validated_data):
+        from configurations.models import Filiere
+        
+        # Extraire filiere_id
+        filiere_id = validated_data.pop('filiere_id')
+        password = validated_data.pop('password', None)
+        
+        # ✅ Récupérer l'objet Filiere
+        try:
+            filiere = Filiere.objects.get(id=filiere_id)
+        except Filiere.DoesNotExist:
+            raise serializers.ValidationError({"filiere_id": "Filière inexistante"})
+        
+        # Créer l'utilisateur
+        user = User.objects.create(
+            nom=validated_data['nom'],
+            prenom=validated_data['prenom'],
+            email=validated_data['email'],
+            role='responsable_filiere',
+            is_staff=True,
+            is_active=True
+        )
+        
+        # Définir le mot de passe
+        if password:
+            user.set_password(password)
+        else:
+            user.set_password(User.objects.make_random_password(length=12))
+        user.save()
+        
+        # ✅ Créer le profil Responsable Filière avec l'objet Filiere
+        ResponsableFiliere.objects.create(
+            user=user,
+            filiere=filiere,  # ✅ Passer l'objet complet, pas l'ID
+            telephone=''
+        )
+        
+        return user
 class UserSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()  # ← AJOUTE ÇA
     candidat = serializers.SerializerMethodField()
     responsable_filiere = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
@@ -60,12 +118,15 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
-            'id', 'email', 'nom', 'prenom', 'role', 'is_active', 
-            'is_email_verified', 'created_at', 'created_by', 'created_by_name',
+            'id', 'email', 'nom', 'prenom', 'full_name',  # ← full_name ajouté
+            'role', 'is_active', 'is_email_verified', 
+            'created_at', 'created_by', 'created_by_name',
             'candidat', 'responsable_filiere'
         ]
         read_only_fields = ['id', 'created_at', 'created_by']
     
+    def get_full_name(self, obj):  # ← AJOUTE ÇA
+        return f"{obj.prenom or ''} {obj.nom or ''}".strip() or obj.email
     def get_candidat(self, obj):
         if obj.role == 'candidat' and hasattr(obj, 'candidat'):
             return {
@@ -82,7 +143,7 @@ class UserSerializer(serializers.ModelSerializer):
             profile = obj.responsable_filiere_profile
             return {
                 'id': profile.id,
-                'filiere': profile.filiere.nom if profile.filiere else None,
+                'filiere': profile.filiere.libelle if profile.filiere else None,
                 'telephone': profile.telephone
             }
         return None
@@ -181,10 +242,12 @@ class RegisterSerializer(serializers.Serializer):
             return user
 
 
+# authentication/serializers.py
+
 class CreateAdminUserSerializer(serializers.Serializer):
     """Création d'utilisateurs admin par super_admin ou admin_academique"""
     email = serializers.EmailField()
-    password = serializers.CharField(write_only=True, min_length=8)
+    password = serializers.CharField(write_only=True, min_length=8)  # ✅ Mot de passe requis
     nom = serializers.CharField(max_length=100)
     prenom = serializers.CharField(max_length=100)
     role = serializers.ChoiceField(choices=[
@@ -193,7 +256,6 @@ class CreateAdminUserSerializer(serializers.Serializer):
     ])
     filiere_id = serializers.IntegerField(required=False, allow_null=True)
     telephone = serializers.CharField(max_length=20, required=False, allow_blank=True)
-    send_email = serializers.BooleanField(default=True)
 
     def validate_email(self, value):
         if User.objects.filter(email=value).exists():
@@ -205,9 +267,18 @@ class CreateAdminUserSerializer(serializers.Serializer):
         target_role = data['role']
         
         # Vérifier les permissions
-        if not request_user.can_create_role(target_role):
+        if request_user.role == 'super_admin':
+            # Super admin peut créer n'importe qui
+            pass
+        elif request_user.role == 'admin_academique':
+            # Admin académique peut créer uniquement des responsables filière
+            if target_role != 'responsable_filiere':
+                raise serializers.ValidationError(
+                    "Vous ne pouvez créer que des responsables de filière."
+                )
+        else:
             raise serializers.ValidationError(
-                f"Vous n'avez pas la permission de créer un utilisateur avec le rôle {target_role}."
+                "Vous n'avez pas la permission de créer des utilisateurs."
             )
         
         # Si responsable_filiere, filiere_id obligatoire
@@ -222,28 +293,32 @@ class CreateAdminUserSerializer(serializers.Serializer):
         request_user = self.context['request'].user
         filiere_id = validated_data.pop('filiere_id', None)
         telephone = validated_data.pop('telephone', '')
-        send_email = validated_data.pop('send_email', True)
         
         with transaction.atomic():
+            # ✅ Créer l'utilisateur avec le mot de passe fourni
             user = User.objects.create_user(
                 email=validated_data['email'],
-                password=validated_data['password'],
+                password=validated_data['password'],  # ✅ Utilise le mot de passe du formulaire
                 nom=validated_data['nom'],
                 prenom=validated_data['prenom'],
                 role=validated_data['role'],
                 created_by=request_user,
-                is_email_verified=True
+                is_email_verified=True,
+                is_staff=True  # ✅ Important pour les admins
             )
             
             # Si responsable de filière, créer le profil
-            if validated_data['role'] == 'responsable_filiere':
+            if validated_data['role'] == 'responsable_filiere' and filiere_id:
                 from configurations.models import Filiere
-                filiere = Filiere.objects.get(id=filiere_id) if filiere_id else None
-                ResponsableFiliere.objects.create(
-                    user=user,
-                    filiere=filiere,
-                    telephone=telephone
-                )
+                try:
+                    filiere = Filiere.objects.get(id=filiere_id)
+                    ResponsableFiliere.objects.create(
+                        user=user,
+                        filiere=filiere,
+                        telephone=telephone or ''
+                    )
+                except Filiere.DoesNotExist:
+                    raise serializers.ValidationError("Filière inexistante")
             
             # Log l'action
             UserActionLog.objects.create(
@@ -254,10 +329,8 @@ class CreateAdminUserSerializer(serializers.Serializer):
                     'role': validated_data['role'],
                     'email': validated_data['email']
                 },
-                ip_address=self.context['request'].META.get('REMOTE_ADDR')
+                ip_address=self.context['request'].META.get('REMOTE_ADDR', '')
             )
-            
-            # TODO: Envoyer email d'activation si send_email=True
             
             return user
 
@@ -344,3 +417,63 @@ class ResetPasswordSerializer(serializers.Serializer):
         )
         
         return target_user
+    
+class UpdateProfileSerializer(serializers.Serializer):
+    """Mise à jour du profil utilisateur"""
+    nom = serializers.CharField(max_length=100, required=False)
+    prenom = serializers.CharField(max_length=100, required=False)
+    email = serializers.EmailField(required=False)
+    
+    def validate_email(self, value):
+        """Vérifier que l'email n'est pas déjà utilisé"""
+        user = self.context['request'].user
+        if value != user.email:
+            from authentication.models import User
+            if User.objects.filter(email=value).exists():
+                raise serializers.ValidationError("Cet email est déjà utilisé")
+        return value
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    """Changement de mot de passe"""
+    current_password = serializers.CharField(write_only=True, required=True)
+    new_password = serializers.CharField(write_only=True, required=True, min_length=8)
+    confirm_password = serializers.CharField(write_only=True, required=True)
+    
+    def validate_current_password(self, value):
+        """Vérifier que l'ancien mot de passe est correct"""
+        user = self.context['request'].user
+        if not user.check_password(value):
+            raise serializers.ValidationError("Mot de passe actuel incorrect")
+        return value
+    
+    def validate(self, data):
+        """Vérifier que les nouveaux mots de passe correspondent"""
+        if data['new_password'] != data['confirm_password']:
+            raise serializers.ValidationError({
+                'confirm_password': "Les mots de passe ne correspondent pas"
+            })
+        
+        # Vérifier que le nouveau est différent de l'ancien
+        if data['current_password'] == data['new_password']:
+            raise serializers.ValidationError({
+                'new_password': "Le nouveau mot de passe doit être différent de l'ancien"
+            })
+        
+        # Valider le nouveau mot de passe
+        user = self.context['request'].user
+        try:
+            validate_password(data['new_password'], user)
+        except Exception as e:
+            raise serializers.ValidationError({
+                'new_password': list(e.messages) if hasattr(e, 'messages') else str(e)
+            })
+        
+        return data
+    
+    def save(self):
+        """Changer le mot de passe"""
+        user = self.context['request'].user
+        user.set_password(self.validated_data['new_password'])
+        user.save()
+        return user
