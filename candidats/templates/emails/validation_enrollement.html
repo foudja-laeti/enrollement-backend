@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background: linear-gradient(135deg, #4F46E5 0%, #7C3AED 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
+        .content { background: #ffffff; padding: 30px; border: 1px solid #E5E7EB; }
+        .success-box { background: #D1FAE5; border-left: 4px solid #10B981; padding: 15px; margin: 20px 0; border-radius: 5px; }
+        .info-box { background: #DBEAFE; border-left: 4px solid #3B82F6; padding: 15px; margin: 20px 0; border-radius: 5px; }
+        .button { display: inline-block; background: #4F46E5; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; margin: 20px 0; }
+        .footer { background: #F3F4F6; padding: 20px; text-align: center; font-size: 12px; color: #6B7280; border-radius: 0 0 10px 10px; }
+        .highlight { color: #4F46E5; font-weight: bold; }
+        ul { padding-left: 20px; }
+        ul li { margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1 style="margin: 0;">✅ Validation d'Enrôlement</h1>
+            <p style="margin: 10px 0 0 0; font-size: 14px;">ESTLC - Session 2025</p>
+        </div>
+        
+        <div class="content">
+            <p>Bonjour <strong>{{ candidat.prenom }} {{ candidat.nom }}</strong>,</p>
+            
+            <div class="success-box">
+                <h3 style="margin-top: 0; color: #059669;">🎉 Félicitations !</h3>
+                <p style="margin-bottom: 0;">
+                    Votre dossier d'enrôlement pour la filière <strong>{{ candidat.filiere.libelle }}</strong> 
+                    a été validé avec succès par notre équipe.
+                </p>
+            </div>
+            
+            <h3>📋 Informations de votre inscription :</h3>
+            <ul>
+                <li><strong>Matricule :</strong> <span class="highlight">{{ candidat.matricule }}</span></li>
+                <li><strong>Filière :</strong> {{ candidat.filiere.libelle }} ({{ candidat.filiere.code }})</li>
+                <li><strong>Centre d'examen :</strong> {{ candidat.centre_examen.nom }}</li>
+                <li><strong>Centre de dépôt :</strong> {{ candidat.centre_depot.nom }}</li>
+            </ul>
+            
+            <div class="info-box">
+                <h3 style="margin-top: 0; color: #1D4ED8;">📌 Prochaines étapes importantes :</h3>
+                <ol>
+                    <li><strong>Téléchargez votre fiche d'enrôlement</strong> (fichier joint à cet email)</li>
+                    <li><strong>Rendez-vous au centre de dépôt</strong> : <span class="highlight">{{ candidat.centre_depot.nom }}</span>
+                        <br>Apportez avec vous :
+                        <ul>
+                            <li>Votre fiche d'enrôlement imprimée</li>
+                            <li>Vos documents personnels (CNI, diplôme, etc.)</li>
+                            <li>Les documents requis mentionnés sur la fiche</li>
+                        </ul>
+                    </li>
+                    <li><strong>Le jour de la composition</strong> :
+                        <ul>
+                            <li>Présentez-vous au centre d'examen : <span class="highlight">{{ candidat.centre_examen.nom }}</span></li>
+                            <li>Apportez OBLIGATOIREMENT votre fiche d'enrôlement</li>
+                            <li>Arrivez 30 minutes avant le début de l'épreuve</li>
+                        </ul>
+                    </li>
+                </ol>
+            </div>
+            
+            <p style="color: #DC2626; font-weight: bold;">
+                ⚠️ IMPORTANT : Conservez précieusement cette fiche. Elle est obligatoire pour accéder à la salle de composition.
+            </p>
+            
+            <p>
+                Pour toute question ou information complémentaire, n'hésitez pas à nous contacter.
+            </p>
+            
+            <p>
+                Cordialement,<br>
+                <strong>L'équipe ESTLC</strong><br>
+                École Supérieure de Transport, de Logistique et de Commerce<br>
+                Université d'Ebolowa
+            </p>
+        </div>
+        
+        <div class="footer">
+            <p><strong>ESTLC - Université d'Ebolowa</strong></p>
+            <p>BP: 22 AMBAM | Tél: (+237) 222 482 412</p>
+            <p>Email: info@estlc.cm | Site: www.estlc.cm</p>
+            <p style="margin-top: 15px; font-size: 11px;">
+                Cet email a été envoyé automatiquement, merci de ne pas y répondre directement.
+            </p>
+        </div>
+    </div>
+</body>
+</html>

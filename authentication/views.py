@@ -1,13 +1,16 @@
 # authentication/views.py
+import logging
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes,authentication_classes
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth.password_validation import validate_password  # ✅ Ajouté
 from django.core.exceptions import ValidationError 
 from django.shortcuts import get_object_or_404
-
+from django.db import transaction # <--- AJOUTÉ : Pour vos blocs transaction.atomic()
+from django.utils import timezone
+from candidats.models import Candidat
 from django.db.models import Q, Count
 from .serializers import (
     LoginSerializer, UserSerializer, RegisterSerializer,
@@ -39,29 +42,76 @@ def get_client_ip(request):
 # AUTHENTIFICATION (PUBLIC)
 # ==========================================
 
+# On récupère le logger par défaut de Django
+logger = logging.getLogger('django')
+
+# authentication/views.py - CORRECTION verify_quitus_view
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework.authentication import SessionAuthentication
+
 @api_view(['POST'])
-@permission_classes([AllowAny])
+@permission_classes([AllowAny])  # ✅ Autorise tout le monde (connecté ou non)
 def verify_quitus_view(request):
     """
     Vérifier un code quitus.
     - Si non utilisé -> status: "available"
     - Si utilisé par l'utilisateur connecté -> status: "owned"
-    - Si utilisé par un autre -> error
+    - Si utilisé par un autre -> error avec action: "login_required"
     """
+    
+    # 🔥 AUTHENTIFICATION MANUELLE OPTIONNELLE
+    jwt_auth = JWTAuthentication()
+    try:
+        auth_result = jwt_auth.authenticate(request)
+        if auth_result is not None:
+            request.user, _ = auth_result
+    except Exception:
+        pass  # Si pas de token ou token invalide, on continue avec AnonymousUser
+    
+    print("\n" + "="*80)
+    print("🔍 VERIFY QUITUS - DEBUG")
+    print("="*80)
+    
     code_quitus = request.data.get('code_quitus')
+    print(f"📝 Code reçu: {code_quitus}")
+    print(f"👤 User: {request.user} (is_authenticated: {request.user.is_authenticated})")
     
+    # Validation du code
     if not code_quitus:
-        return Response({'error': 'Code quitus requis'}, status=status.HTTP_400_BAD_REQUEST)
+        print("❌ Code manquant")
+        return Response(
+            {'error': 'Code quitus requis'}, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
     
+    # Vérifier l'existence du code
     try:
         quitus = CodeQuitus.objects.get(code=code_quitus)
+        print(f"✅ Code trouvé: {quitus.code}")
+        print(f"   - Utilisé: {quitus.utilise}")
+        print(f"   - Utilisateur ID: {quitus.utilisateur_id}")
     except CodeQuitus.DoesNotExist:
-        return Response({'error': 'Code quitus invalide'}, status=status.HTTP_404_NOT_FOUND)
+        print("❌ Code inexistant")
+        return Response(
+            {'error': 'Code quitus invalide'}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
     
-    if not quitus.est_valide() and not quitus.utilise:
-        return Response({'error': 'Code quitus expiré'}, status=status.HTTP_400_BAD_REQUEST)
+    # Vérifier la validité (expiration)
+    if hasattr(quitus, 'est_valide'):
+        if not quitus.est_valide() and not quitus.utilise:
+            print("❌ Code expiré")
+            return Response(
+                {'error': 'Code quitus expiré'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
     
+    # CAS 1 : CODE NON UTILISÉ ✅
     if not quitus.utilise:
+        print("✅ STATUS: AVAILABLE (code non utilisé)")
         return Response({
             'status': 'available',
             'message': 'Code quitus valide et disponible',
@@ -69,16 +119,21 @@ def verify_quitus_view(request):
             'reference_bancaire': quitus.reference_bancaire,
             'date_expiration': quitus.date_expiration.isoformat(),
         }, status=status.HTTP_200_OK)
-
-    user = request.user if request.user.is_authenticated else None
     
-    if not user:
+    # CAS 2 & 3 : CODE DÉJÀ UTILISÉ
+    print(f"⚠️ Code déjà utilisé par user_id: {quitus.utilisateur_id}")
+    
+    # Vérifier si l'utilisateur est connecté
+    if not request.user.is_authenticated:
+        print("❌ User non connecté → login_required")
         return Response({
             'error': 'Ce code est déjà utilisé. Veuillez vous connecter si c\'est votre code.',
             'action': 'login_required'
         }, status=status.HTTP_400_BAD_REQUEST)
     
-    if quitus.utilisateur_id == user.id:
+    # Vérifier si c'est le propriétaire du code
+    if quitus.utilisateur_id == request.user.id:
+        print("✅ STATUS: OWNED (code appartient à l'utilisateur connecté)")
         return Response({
             'status': 'owned',
             'message': 'Ce code est déjà associé à votre compte',
@@ -86,32 +141,12 @@ def verify_quitus_view(request):
             'reference_bancaire': quitus.reference_bancaire,
         }, status=status.HTTP_200_OK)
     else:
+        print(f"❌ Code appartient à un autre user (ID: {quitus.utilisateur_id})")
         return Response({
             'error': 'Ce code quitus est déjà utilisé par un autre candidat'
         }, status=status.HTTP_400_BAD_REQUEST)
-
-
 @api_view(['POST'])
-@permission_classes([AllowAny])
-def login_view(request):
-    """Connexion utilisateur"""
-    serializer = LoginSerializer(data=request.data)
-    
-    if serializer.is_valid():
-        user = serializer.validated_data['user']
-        tokens = get_tokens_for_user(user)
-        user_data = UserSerializer(user).data
-        
-        return Response({
-            'message': 'Connexion réussie',
-            'user': user_data,
-            'tokens': tokens
-        }, status=status.HTTP_200_OK)
-    
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
-@api_view(['POST'])
+@authentication_classes([])  # 🔥 CRUCIAL
 @permission_classes([AllowAny])
 def register_view(request):
     """Inscription candidat avec code quitus"""
@@ -128,8 +163,6 @@ def register_view(request):
         }, status=status.HTTP_201_CREATED)
     
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def logout_view(request):
@@ -150,7 +183,28 @@ def profile_view(request):
     user_data = UserSerializer(request.user).data
     return Response(user_data, status=status.HTTP_200_OK)
 
+# authentication/views.py
 
+# Après verify_quitus_view, ajoutez :
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def login_view(request):
+    """Connexion utilisateur"""
+    serializer = LoginSerializer(data=request.data)
+    
+    if serializer.is_valid():
+        user = serializer.validated_data['user']
+        tokens = get_tokens_for_user(user)
+        user_data = UserSerializer(user).data
+        
+        return Response({
+            'message': 'Connexion réussie',
+            'user': user_data,
+            'tokens': tokens
+        }, status=status.HTTP_200_OK)
+    
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 # ==========================================
 # GESTION DES UTILISATEURS (ADMIN)
 # ==========================================

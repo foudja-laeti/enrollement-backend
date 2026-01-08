@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            line-height: 1.6; 
+            color: #333; 
+            margin: 0;
+            padding: 0;
+            background-color: #f5f5f5;
+        }
+        .container { 
+            max-width: 600px; 
+            margin: 0 auto; 
+            padding: 20px; 
+        }
+        .header { 
+            background: linear-gradient(135deg, #DC2626 0%, #991B1B 100%); 
+            color: white; 
+            padding: 30px; 
+            text-align: center; 
+            border-radius: 10px 10px 0 0; 
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 24px;
+        }
+        .header p {
+            margin: 10px 0 0 0;
+            font-size: 14px;
+            opacity: 0.9;
+        }
+        .content { 
+            background: #ffffff; 
+            padding: 30px; 
+            border: 1px solid #E5E7EB;
+            border-top: none;
+        }
+        .warning-box { 
+            background: #FEE2E2; 
+            border-left: 4px solid #DC2626; 
+            padding: 15px; 
+            margin: 20px 0; 
+            border-radius: 5px; 
+        }
+        .warning-box h3 {
+            margin-top: 0;
+            color: #991B1B;
+            font-size: 16px;
+        }
+        .warning-box p {
+            margin-bottom: 0;
+            color: #7F1D1D;
+        }
+        .info-box { 
+            background: #DBEAFE; 
+            border-left: 4px solid #3B82F6; 
+            padding: 15px; 
+            margin: 20px 0; 
+            border-radius: 5px; 
+        }
+        .info-box h3 {
+            margin-top: 0;
+            color: #1D4ED8;
+            font-size: 16px;
+        }
+        .motif-box {
+            background: #F3F4F6;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 15px 0;
+            border: 1px solid #D1D5DB;
+        }
+        .motif-box p {
+            margin: 0;
+            color: #1F2937;
+            font-weight: 500;
+            font-size: 14px;
+        }
+        .footer { 
+            background: #F3F4F6; 
+            padding: 20px; 
+            text-align: center; 
+            font-size: 12px; 
+            color: #6B7280; 
+            border-radius: 0 0 10px 10px;
+            border: 1px solid #E5E7EB;
+            border-top: none;
+        }
+        .footer p {
+            margin: 5px 0;
+        }
+        .footer strong {
+            color: #374151;
+        }
+        h3 {
+            color: #1F2937;
+            font-size: 15px;
+            margin-top: 20px;
+            margin-bottom: 10px;
+        }
+        ul { 
+            padding-left: 20px;
+            margin: 10px 0;
+        }
+        ul li { 
+            margin: 10px 0;
+            color: #374151;
+        }
+        strong {
+            color: #111827;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📋 Notification de Dossier</h1>
+            <p>ESTLC - Session 2025</p>
+        </div>
+        
+        <div class="content">
+            <p>Bonjour <strong>{{ candidat.prenom }} {{ candidat.nom }}</strong>,</p>
+            
+            <div class="warning-box">
+                <h3>❌ Dossier non validé</h3>
+                <p>
+                    Après examen de votre dossier d'enrôlement pour la filière <strong>{{ candidat.filiere.libelle }}</strong>, 
+                    nous regrettons de vous informer que celui-ci n'a pas pu être validé.
+                </p>
+            </div>
+            
+            <h3>📝 Motif du rejet :</h3>
+            <div class="motif-box">
+                <p>{{ motif }}</p>
+            </div>
+            
+            <div class="info-box">
+                <h3>💡 Que faire maintenant ?</h3>
+                <ul>
+                    <li>Prenez connaissance du motif de rejet ci-dessus</li>
+                    <li>Corrigez les éléments mentionnés dans votre dossier</li>
+                    <li>Vous pouvez soumettre un nouveau dossier conforme aux exigences</li>
+                    <li>Contactez-nous si vous avez besoin d'éclaircissements</li>
+                </ul>
+            </div>
+            
+            <p>
+                Nous restons à votre disposition pour toute question ou assistance concernant votre candidature.
+            </p>
+            
+            <p>
+                Cordialement,<br>
+                <strong>L'équipe ESTLC</strong><br>
+                École Supérieure de Transport, de Logistique et de Commerce<br>
+                Université d'Ebolowa
+            </p>
+        </div>
+        
+        <div class="footer">
+            <p><strong>ESTLC - Université d'Ebolowa</strong></p>
+            <p>BP: 22 AMBAM | Tél: (+237) 222 482 412</p>
+            <p>Email: info@estlc.cm | Site: www.estlc.cm</p>
+            <p style="margin-top: 15px; font-size: 11px;">
+                Cet email a été envoyé automatiquement, merci de ne pas y répondre directement.
+            </p>
+        </div>
+    </div>
+</body>
+</html>

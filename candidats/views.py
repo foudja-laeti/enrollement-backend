@@ -6,13 +6,15 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.db.models import Q
 from django.utils import timezone
+from candidats.utils.pdf_generator import generer_fiche_enrollement
+from django.core.mail import EmailMessage
 from django.core.mail import send_mail
 from django.template.loader import render_to_string
 from django.conf import settings
 import qrcode
 from io import BytesIO
 import base64
-
+from .utils.pdf_generator import generer_fiche_enrollement
 from .models import Candidat, Dossier, Document
 from .serializers import (
     CandidatEnrollementSerializer,
@@ -132,7 +134,6 @@ import qrcode
 import base64
 from io import BytesIO
 from datetime import date, timedelta
-
 
 class ResponsableFiliereViewSet(viewsets.ViewSet):
     """ViewSet pour les responsables de filière"""
@@ -412,172 +413,6 @@ class ResponsableFiliereViewSet(viewsets.ViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
-    @action(detail=True, methods=['post'], url_path='valider-dossier')
-    def valider_dossier(self, request, pk=None):
-        """Valider le dossier d'un candidat"""
-        try:
-            user = request.user
-            rf_profile = user.responsable_filiere_profile
-            
-            # Récupérer le candidat
-            candidat = Candidat.objects.get(
-                id=pk,
-                filiere=rf_profile.filiere
-            )
-            
-            if candidat.statut_dossier != 'complet':
-                return Response(
-                    {'error': 'Le dossier doit être complet pour être validé'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Valider le dossier
-            candidat.statut_dossier = 'valide'
-            candidat.date_validation = timezone.now()
-            if hasattr(candidat, 'valide_par'):
-                candidat.valide_par = user
-            candidat.save()
-            
-            # Générer le QR Code
-            try:
-                qr_data = f"MATRICULE:{candidat.matricule}|NOM:{candidat.nom}|PRENOM:{candidat.prenom}|FILIERE:{candidat.filiere.code}"
-                qr = qrcode.QRCode(version=1, box_size=10, border=5)
-                qr.add_data(qr_data)
-                qr.make(fit=True)
-                
-                img = qr.make_image(fill_color="black", back_color="white")
-                buffer = BytesIO()
-                img.save(buffer, format='PNG')
-                qr_base64 = base64.b64encode(buffer.getvalue()).decode()
-            except Exception as qr_error:
-                print(f"Erreur génération QR: {qr_error}")
-                qr_base64 = None
-            
-            # Envoyer l'email de confirmation
-            try:
-                context = {
-                    'candidat': candidat,
-                    'qr_code': qr_base64,
-                    'filiere': candidat.filiere
-                }
-                
-                html_message = render_to_string(
-                    'emails/validation_enrollement.html',
-                    context
-                )
-                
-                send_mail(
-                    subject=f'Validation de votre enrôlement - {candidat.filiere.libelle}',
-                    message='Votre enrôlement a été validé',
-                    from_email=settings.DEFAULT_FROM_EMAIL,
-                    recipient_list=[candidat.email],
-                    html_message=html_message,
-                    fail_silently=True
-                )
-            except Exception as email_error:
-                print(f"Erreur envoi email: {email_error}")
-            
-            return Response({
-                'success': True,
-                'message': 'Dossier validé avec succès',
-                'candidat': {
-                    'id': candidat.id,
-                    'matricule': candidat.matricule,
-                    'statut': candidat.statut_dossier
-                }
-            })
-            
-        except Candidat.DoesNotExist:
-            return Response(
-                {'error': 'Candidat non trouvé'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-    
-    @action(detail=True, methods=['post'], url_path='rejeter-dossier')
-    def rejeter_dossier(self, request, pk=None):
-        """Rejeter le dossier d'un candidat avec motif"""
-        try:
-            user = request.user
-            rf_profile = user.responsable_filiere_profile
-            motif = request.data.get('motif', '')
-            
-            if not motif:
-                return Response(
-                    {'error': 'Le motif de rejet est obligatoire'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Récupérer le candidat
-            candidat = Candidat.objects.get(
-                id=pk,
-                filiere=rf_profile.filiere
-            )
-            
-            # Rejeter le dossier
-            candidat.statut_dossier = 'rejete'
-            if hasattr(candidat, 'motif_rejet'):
-                candidat.motif_rejet = motif
-            if hasattr(candidat, 'date_rejet'):
-                candidat.date_rejet = timezone.now()
-            if hasattr(candidat, 'rejete_par'):
-                candidat.rejete_par = user
-            candidat.save()
-            
-            # Envoyer l'email de rejet
-            try:
-                context = {
-                    'candidat': candidat,
-                    'motif': motif,
-                    'filiere': candidat.filiere
-                }
-                
-                html_message = render_to_string(
-                    'emails/rejet_enrollement.html',
-                    context
-                )
-                
-                send_mail(
-                    subject=f'Rejet de votre enrôlement - {candidat.filiere.libelle}',
-                    message=f'Votre enrôlement a été rejeté. Motif: {motif}',
-                    from_email=settings.DEFAULT_FROM_EMAIL,
-                    recipient_list=[candidat.email],
-                    html_message=html_message,
-                    fail_silently=True
-                )
-            except Exception as email_error:
-                print(f"Erreur envoi email: {email_error}")
-            
-            return Response({
-                'success': True,
-                'message': 'Dossier rejeté avec succès',
-                'candidat': {
-                    'id': candidat.id,
-                    'matricule': candidat.matricule,
-                    'statut': candidat.statut_dossier,
-                    'motif_rejet': motif
-                }
-            })
-            
-        except Candidat.DoesNotExist:
-            return Response(
-                {'error': 'Candidat non trouvé'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-    
     @action(detail=False, methods=['get'], url_path='profil-filiere')
     def profil_filiere(self, request):
         """Informations détaillées sur la filière du RF"""
@@ -744,6 +579,237 @@ class ResponsableFiliereViewSet(viewsets.ViewSet):
             
             return response
             
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=True, methods=['post'], url_path='valider-dossier')
+    def valider_dossier(self, request, pk=None):
+        """Valider le dossier d'un candidat"""
+        print("\n" + "="*80)
+        print("🚀 DÉBUT VALIDATION")
+        print("="*80)
+        
+        try:
+            print("1️⃣ Récupération user...")
+            user = request.user
+            print(f"   User: {user.email}")
+            
+            print("2️⃣ Récupération profil RF...")
+            rf_profile = user.responsable_filiere_profile
+            print(f"   RF Filière: {rf_profile.filiere.libelle}")
+            
+            print(f"3️⃣ Recherche candidat ID={pk}...")
+            candidat = Candidat.objects.get(
+                id=pk,
+                filiere=rf_profile.filiere
+            )
+            print(f"   ✅ Candidat trouvé: {candidat.matricule}")
+            print(f"   Statut: {candidat.statut_dossier}")
+            
+            if candidat.statut_dossier != 'complet':
+                print(f"   ❌ Statut invalide!")
+                return Response(
+                    {'error': 'Le dossier doit être complet pour être validé'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            print("4️⃣ Mise à jour statut en BD...")
+            candidat.statut_dossier = 'valide'
+            candidat.date_validation = timezone.now()
+            if hasattr(candidat, 'valide_par'):
+                candidat.valide_par = user
+            candidat.save()
+            print("   ✅ Statut sauvegardé en BD")
+            
+            print("5️⃣ DÉBUT GÉNÉRATION EMAIL...")
+            try:
+                print("   📄 Import pdf_generator...")
+                from candidats.utils.pdf_generator import generer_fiche_enrollement
+                print("   ✅ Import OK")
+                
+                print("   📄 Appel generer_fiche_enrollement()...")
+                pdf_buffer = generer_fiche_enrollement(candidat)
+                print("   ✅ Fonction retournée")
+                
+                print("   📦 Lecture contenu PDF...")
+                pdf_size = len(pdf_buffer.getvalue())
+                print(f"   ✅ PDF: {pdf_size} octets")
+                
+                if pdf_size == 0:
+                    print("   ❌ PDF VIDE!")
+                    raise ValueError("PDF vide")
+                
+                print("   📧 Import render_to_string...")
+                from django.template.loader import render_to_string
+                print("   ✅ Import OK")
+                
+                print("   📧 Préparation contexte...")
+                context = {
+                    'candidat': candidat,
+                    'filiere': candidat.filiere
+                }
+                print("   ✅ Contexte OK")
+                
+                print("   📧 Rendu template...")
+                html_message = render_to_string(
+                    'emails/validation_enrollement.html',
+                    context
+                )
+                print(f"   ✅ Template rendu: {len(html_message)} caractères")
+                
+                print("   📧 Import EmailMessage...")
+                from django.core.mail import EmailMessage
+                from django.conf import settings
+                print("   ✅ Import OK")
+                
+                print("   📧 Création EmailMessage...")
+                email = EmailMessage(
+                    subject=f'✅ Validation de votre enrôlement - {candidat.filiere.libelle}',
+                    body=html_message,
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    to=[candidat.email],
+                )
+                print("   ✅ Email créé")
+                
+                print("   📧 Définition content_subtype...")
+                email.content_subtype = "html"
+                print("   ✅ Content type défini")
+                
+                print("   📎 Attachement PDF...")
+                filename = f'Fiche_Enrollement_{candidat.matricule}.pdf'
+                email.attach(filename, pdf_buffer.getvalue(), 'application/pdf')
+                print(f"   ✅ PDF attaché: {filename}")
+                print(f"   📋 Pièces jointes: {len(email.attachments)}")
+                
+                print("   📤 Envoi email...")
+                result = email.send(fail_silently=False)
+                print(f"   ✅ Envoi terminé: result={result}")
+                
+                if result == 1:
+                    print(f"   🎉 EMAIL ENVOYÉ à {candidat.email}")
+                else:
+                    print(f"   ⚠️ result={result} (attendu 1)")
+                
+            except Exception as email_error:
+                print(f"\n❌ ERREUR DANS BLOC EMAIL:")
+                print(f"   Type: {type(email_error).__name__}")
+                print(f"   Message: {str(email_error)}")
+                import traceback
+                traceback.print_exc()
+                print("   ⚠️ DOSSIER VALIDÉ mais email NON envoyé")
+            
+            print("6️⃣ Retour Response...")
+            print("="*80 + "\n")
+            
+            return Response({
+                'success': True,
+                'message': 'Dossier validé avec succès',
+                'candidat': {
+                    'id': candidat.id,
+                    'matricule': candidat.matricule,
+                    'statut': candidat.statut_dossier
+                }
+            })
+            
+        except Candidat.DoesNotExist:
+            print("❌ Candidat non trouvé")
+            return Response(
+                {'error': 'Candidat non trouvé'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            print(f"❌ ERREUR GÉNÉRALE: {e}")
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=True, methods=['post'], url_path='rejeter-dossier')
+    def rejeter_dossier(self, request, pk=None):
+        """Rejeter le dossier d'un candidat avec motif"""
+        try:
+            user = request.user
+            rf_profile = user.responsable_filiere_profile
+            motif = request.data.get('motif', '')
+            
+            if not motif:
+                return Response(
+                    {'error': 'Le motif de rejet est obligatoire'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            candidat = Candidat.objects.get(
+                id=pk,
+                filiere=rf_profile.filiere
+            )
+            
+            # Rejeter le dossier
+            candidat.statut_dossier = 'rejete'
+            if hasattr(candidat, 'motif_rejet'):
+                candidat.motif_rejet = motif
+            if hasattr(candidat, 'date_rejet'):
+                candidat.date_rejet = timezone.now()
+            if hasattr(candidat, 'rejete_par'):
+                candidat.rejete_par = user
+            candidat.save()
+            
+            # Envoyer l'email
+            try:
+                context = {
+                    'candidat': candidat,
+                    'motif': motif,
+                    'filiere': candidat.filiere
+                }
+                
+                html_message = render_to_string(
+                    'emails/rejet_enrollement.html',
+                    context
+                )
+                
+                email = EmailMessage(
+                    subject=f'📋 Notification concernant votre dossier - {candidat.filiere.libelle}',
+                    body='Votre dossier a été examiné. Veuillez consulter les détails ci-dessous.',
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    to=[candidat.email],
+                )
+                
+                # Ajouter le HTML
+                email.content_subtype = "html"
+                email.body = html_message
+                
+                # Envoyer l'email
+                email.send(fail_silently=False)
+                
+                print(f"✅ Email de rejet envoyé à {candidat.email}")
+                
+            except Exception as email_error:
+                print(f"❌ Erreur envoi email: {email_error}")
+                import traceback
+                traceback.print_exc()
+            
+            return Response({
+                'success': True,
+                'message': 'Dossier rejeté avec succès',
+                'candidat': {
+                    'id': candidat.id,
+                    'matricule': candidat.matricule,
+                    'statut': candidat.statut_dossier,
+                    'motif_rejet': motif
+                }
+            })
+            
+        except Candidat.DoesNotExist:
+            return Response(
+                {'error': 'Candidat non trouvé'},
+                status=status.HTTP_404_NOT_FOUND
+            )
         except Exception as e:
             import traceback
             traceback.print_exc()
