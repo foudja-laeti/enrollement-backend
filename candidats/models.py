@@ -266,3 +266,32 @@ class Document(models.Model):
 
     def __str__(self):
         return f"{self.get_type_document_display()} - {self.candidat.nom}"
+
+class Notification(models.Model):
+    TYPE_CHOICES = [
+        ('success', 'Succès'),
+        ('validation', 'Validation'),
+        ('error', 'Erreur'),
+        ('rejection', 'Rejet'),
+        ('warning', 'Avertissement'),
+        ('info', 'Information'),
+    ]
+    
+    candidat = models.ForeignKey('Candidat', on_delete=models.CASCADE, related_name='notifications')
+    titre = models.CharField(max_length=255)
+    message = models.TextField()
+    type = models.CharField(max_length=20, choices=TYPE_CHOICES, default='info')
+    is_read = models.BooleanField(default=False)
+    action_url = models.CharField(max_length=500, null=True, blank=True)
+    action_label = models.CharField(max_length=100, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Notification'
+        verbose_name_plural = 'Notifications'
+    
+    def __str__(self):
+        return f"{self.titre} - {self.candidat.matricule}"
+

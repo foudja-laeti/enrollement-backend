@@ -2,31 +2,211 @@
 from rest_framework import status, viewsets
 from rest_framework.decorators import api_view, permission_classes, parser_classes, action
 from rest_framework.response import Response
+from django.db.models import Count, Q, F, Avg, Sum
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.db.models import Q
+from authentication.models import User
 from django.utils import timezone
+from datetime import date, timedelta
+from candidats.utils.utils import create_notification
 from candidats.utils.pdf_generator import generer_fiche_enrollement
 from django.core.mail import EmailMessage
 from django.core.mail import send_mail
 from django.template.loader import render_to_string
 from django.conf import settings
+from .permissions import IsAdminAcademique
 import qrcode
 from io import BytesIO
 import base64
 from .utils.pdf_generator import generer_fiche_enrollement
-from .models import Candidat, Dossier, Document
+from .models import Candidat, Dossier, Document,  Notification
 from .serializers import (
     CandidatEnrollementSerializer,
     CandidatListSerializer,
     CandidatDetailSerializer,
     DossierValidationSerializer
 )
-from .permissions import IsResponsableFiliere
+from .permissions import IsResponsableFiliere, IsAdminAcademique
 from authentication.models import CodeQuitus
 from configurations.models import Filiere
+def send_validation_email_async(candidat_id):
+    """Envoyer l'email de validation en arrière-plan (NON BLOQUANT)"""
+    try:
+        # Importer DANS le thread pour éviter les problèmes de connexion DB
+        from candidats.models import Candidat
+        from candidats.utils.pdf_generator import generer_fiche_enrollement
+        from django.template.loader import render_to_string
+        from django.core.mail import EmailMessage
+        from django.conf import settings
+        import socket
+        
+        print(f"\n🧵 [THREAD EMAIL] Démarré pour candidat ID={candidat_id}")
+        
+        # Récupérer le candidat
+        candidat = Candidat.objects.get(id=candidat_id)
+        print(f"   ✅ Candidat: {candidat.matricule}")
+        
+        # Générer le PDF
+        print("   📄 Génération PDF...")
+        pdf_buffer = generer_fiche_enrollement(candidat)
+        print(f"   ✅ PDF: {len(pdf_buffer.getvalue())} octets")
+        
+        # Préparer le contexte
+        context = {
+            'candidat': candidat,
+            'filiere': candidat.filiere
+        }
+        
+        # Rendre le template HTML
+        print("   📧 Rendu template...")
+        html_message = render_to_string(
+            'emails/validation_enrollement.html',
+            context
+        )
+        print(f"   ✅ Template: {len(html_message)} caractères")
+        
+        # Créer l'email
+        print("   📧 Création EmailMessage...")
+        email = EmailMessage(
+            subject=f'✅ Validation enrôlement - {candidat.filiere.libelle}',
+            body=html_message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to=[candidat.email],
+        )
+        email.content_subtype = "html"
+        
+        # Attacher le PDF
+        filename = f'Fiche_Enrollement_{candidat.matricule}.pdf'
+        email.attach(filename, pdf_buffer.getvalue(), 'application/pdf')
+        print(f"   ✅ PDF attaché")
+        
+        # 🔥 ENVOYER AVEC TIMEOUT
+        print("   📤 Envoi email (timeout 15s)...")
+        socket.setdefaulttimeout(15)  # Timeout de 15 secondes
+        
+        result = email.send(fail_silently=False)
+        
+        if result == 1:
+            print(f"   ✅ ✅ ✅ EMAIL ENVOYÉ avec succès à {candidat.email}")
+        else:
+            print(f"   ⚠️ Résultat: {result}")
+        
+    except socket.timeout:
+        print(f"   ❌ TIMEOUT lors de l'envoi email (serveur SMTP ne répond pas)")
+    except Exception as e:
+        print(f"   ❌ Erreur email thread: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        print(f"🧵 [THREAD EMAIL] Terminé\n")
 
-
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def check_enrollment_status(request):
+    """Vérifier si le candidat est déjà enrôlé"""
+    try:
+        user = request.user
+        print(f"\n{'='*60}")
+        print(f"🔍 CHECK ENROLLMENT STATUS")
+        print(f"{'='*60}")
+        print(f"👤 User: {user.email} (role: {user.role})")
+        
+        # Vérifier si c'est un candidat
+        if user.role != 'candidat':
+            print(f"❌ Pas un candidat (role: {user.role})")
+            return Response({
+                'is_enrolled': False,
+                'message': 'Utilisateur non candidat'
+            })
+        
+        # Chercher le candidat
+        try:
+            candidat = Candidat.objects.get(user=user)
+            print(f"✅ Candidat trouvé: {candidat.matricule}")
+            print(f"   Statut: {candidat.statut_dossier}")
+            print(f"   Nom: {candidat.prenom} {candidat.nom}")
+            
+            # Un candidat est considéré comme "enrôlé" si son dossier existe
+            # peut être en_attente, complet, valide ou même rejete
+            is_enrolled = candidat.statut_dossier in ['en_attente', 'complet', 'valide', 'rejete']
+            
+            print(f"📊 Is enrolled: {is_enrolled}")
+            print(f"{'='*60}\n")
+            
+            return Response({
+                'is_enrolled': is_enrolled,
+                'statut_dossier': candidat.statut_dossier,
+                'matricule': candidat.matricule,
+                'nom_complet': f"{candidat.prenom} {candidat.nom}",
+                'filiere': candidat.filiere.libelle if candidat.filiere else None,
+                'photo_url': request.build_absolute_uri(
+                    settings.MEDIA_URL + candidat.photo_path
+                ) if candidat.photo_path else None
+            })
+            
+        except Candidat.DoesNotExist:
+            print(f"❌ Aucun candidat trouvé pour user {user.id}")
+            print(f"{'='*60}\n")
+            return Response({
+                'is_enrolled': False,
+                'message': 'Aucun profil candidat trouvé'
+            })
+            
+    except Exception as e:
+        print(f"❌ Erreur check enrollment: {e}")
+        import traceback
+        traceback.print_exc()
+        return Response({
+            'is_enrolled': False,
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+@api_view(['GET', 'PUT'])
+@permission_classes([IsAuthenticated])
+def mon_profil_view(request):
+    """
+    GET: Récupérer les informations du profil candidat
+    PUT: Mettre à jour le profil (si nécessaire plus tard)
+    """
+    try:
+        candidat = request.user.candidat
+    except Candidat.DoesNotExist:
+        return Response({
+            'error': 'Profil candidat non trouvé'
+        }, status=status.HTTP_404_NOT_FOUND)
+    
+    if request.method == 'GET':
+        # Récupérer le code quitus associé
+        code_quitus = ''
+        try:
+            quitus = CodeQuitus.objects.get(utilisateur=request.user)
+            code_quitus = quitus.code
+        except CodeQuitus.DoesNotExist:
+            pass
+        
+        data = {
+            'candidat': {
+                'id': candidat.id,
+                'matricule': candidat.matricule,
+                'nom': candidat.nom,
+                'prenom': candidat.prenom,
+                'email': candidat.email,
+                'telephone': candidat.telephone,
+                'date_naissance': candidat.date_naissance,
+                'lieu_naissance': candidat.lieu_naissance,
+                'sexe': candidat.sexe,
+                'code_quitus': code_quitus,  # ✅ Code quitus ajouté
+                'statut_dossier': candidat.statut_dossier,
+                'created_at': candidat.created_at
+            }
+        }
+        return Response(data, status=status.HTTP_200_OK)
+    
+    elif request.method == 'PUT':
+        # Pour une future mise à jour du profil (optionnel)
+        return Response({
+            'message': 'Mise à jour du profil non implémentée'
+        }, status=status.HTTP_501_NOT_IMPLEMENTED)
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 @parser_classes([MultiPartParser, FormParser])
@@ -63,17 +243,12 @@ def enrollement_view(request):
     for key, value in request.data.items():
         print(f"  📝 {key}: {value}")
     
-    # 🔥 FIX : COMBINER request.data + request.FILES
-    data = request.data.copy()  # Copie mutable
-    for key, file in request.FILES.items():
-        data[key] = file  # Ajoute les fichiers !
+    # 🔥 FIX CRITIQUE : CRÉER UN DICT STANDARD AU LIEU DE .copy()
+    # request.data contient déjà les fichiers ET les données
+    # Pas besoin de les combiner manuellement
     
-    print(f"\n🔗 DATA+FICHIERS ({len(data)} champs):")
-    for key in data.keys():
-        print(f"  ✅ {key}: {'FILE' if hasattr(data[key], 'name') else data[key]}")
-    
-    # ✅ 4. VALIDATION SERIALIZER
-    serializer = CandidatEnrollementSerializer(data=data, context={'request': request})
+    # ✅ 4. VALIDATION SERIALIZER DIRECTEMENT AVEC request.data
+    serializer = CandidatEnrollementSerializer(data=request.data, context={'request': request})
     
     print(f"\n🔍 VALIDATION...")
     if serializer.is_valid():
@@ -117,24 +292,293 @@ def enrollement_view(request):
     }, status=status.HTTP_400_BAD_REQUEST)
 # candidats/views.py - ResponsableFiliereViewSet COMPLET ET CORRIGÉ
 
-from rest_framework import viewsets, status
-from rest_framework.decorators import action
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from django.http import HttpResponse
-from django.utils import timezone
-from django.db.models import Count, Avg, Q
-from django.conf import settings
-from django.template.loader import render_to_string
-from django.core.mail import send_mail
-from authentication.permissions import IsResponsableFiliere
-from .models import Candidat, Document
-import csv
-import qrcode
-import base64
-from io import BytesIO
-from datetime import date, timedelta
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def mon_dossier_view(request):
+    """
+    Récupérer le dossier complet du candidat connecté
+    """
+    user = request.user
+    
+    # Vérifier que c'est un candidat
+    if user.role != 'candidat':
+        return Response({
+            'error': 'Accès refusé',
+            'message': 'Seuls les candidats peuvent accéder à cette page.'
+        }, status=status.HTTP_403_FORBIDDEN)
+    
+    # Récupérer le candidat
+    try:
+        candidat = Candidat.objects.select_related(
+            'user',
+            'region',
+            'departement',
+            'bac',
+            'serie',
+            'mention',
+            'filiere',
+            'niveau',
+            'centre_examen',
+            'centre_depot',
+            'valide_par'
+        ).get(user=user)
+    except Candidat.DoesNotExist:
+        return Response({
+            'error': 'Profil candidat non trouvé',
+            'message': 'Veuillez compléter votre enrôlement.'
+        }, status=status.HTTP_404_NOT_FOUND)
+    
+    # Récupérer le dossier
+    try:
+        dossier = Dossier.objects.select_related(
+            'annee_scolaire'
+        ).get(candidat=candidat)
+    except Dossier.DoesNotExist:
+        dossier = None
+    
+    # Récupérer les documents (✅ Correction: created_at au lieu de date_upload)
+    documents = Document.objects.filter(candidat=candidat).order_by('-created_at')
+    
+    # Construire les URLs complètes pour les documents
+    from django.conf import settings
+    documents_data = []
+    for doc in documents:
+        doc_url = f"{settings.MEDIA_URL}{doc.chemin_fichier}" if doc.chemin_fichier else None
+        if doc_url and not doc_url.startswith('http'):
+            doc_url = request.build_absolute_uri(doc_url)
+        
+        documents_data.append({
+            'id': doc.id,
+            'type_document': doc.type_document,
+            'nom_fichier': doc.nom_fichier,
+            'nom_original': doc.nom_original,
+            'url': doc_url,
+            'taille_fichier': doc.taille_fichier,
+            'extension': doc.extension,
+            'is_verified': doc.is_verified,
+            'date_upload': doc.created_at,  # ✅ Utiliser created_at
+            'date_verification': doc.verified_at  # ✅ Correction du nom
+        })
+    
+    # Construire l'URL de la photo
+    photo_url = None
+    if candidat.photo_path:
+        photo_url = f"{settings.MEDIA_URL}{candidat.photo_path}"
+        if not photo_url.startswith('http'):
+            photo_url = request.build_absolute_uri(photo_url)
+    
+    # Construire la réponse
+    response_data = {
+        'candidat': {
+            'id': candidat.id,
+            'matricule': candidat.matricule,
+            'nom': candidat.nom,
+            'prenom': candidat.prenom,
+            'email': candidat.email,
+            'telephone': candidat.telephone,
+            'telephone_secondaire': candidat.telephone_secondaire,
+            'date_naissance': candidat.date_naissance,
+            'lieu_naissance': candidat.lieu_naissance,
+            'sexe': candidat.sexe,
+            'ville': candidat.ville,
+            'quartier': candidat.quartier,
+            'adresse_actuelle': candidat.adresse_actuelle,
+            'photo_url': photo_url,
+            
+            # Parents
+            'nom_pere': candidat.nom_pere,
+            'tel_pere': candidat.tel_pere,
+            'nom_mere': candidat.nom_mere,
+            'tel_mere': candidat.tel_mere,
+            
+            # Localisation
+            'region': {
+                'id': candidat.region.id,
+                'nom': candidat.region.nom
+            } if candidat.region else None,
+            'departement': {
+                'id': candidat.departement.id,
+                'nom': candidat.departement.nom
+            } if candidat.departement else None,
+            
+            # Académique
+            'bac': {
+                'id': candidat.bac.id,
+                'libelle': candidat.bac.libelle
+            } if candidat.bac else None,
+            'serie': {
+                'id': candidat.serie.id,
+                'libelle': candidat.serie.libelle
+            } if candidat.serie else None,
+            'mention': {
+                'id': candidat.mention.id,
+                'libelle': candidat.mention.libelle
+            } if candidat.mention else None,
+            'filiere': {
+                'id': candidat.filiere.id,
+                'libelle': candidat.filiere.libelle
+            } if candidat.filiere else None,
+            'niveau': {
+                'id': candidat.niveau.id,
+                'libelle': candidat.niveau.libelle
+            } if candidat.niveau else None,
+            'centre_examen': {
+                'id': candidat.centre_examen.id,
+                'nom': candidat.centre_examen.nom
+            } if candidat.centre_examen else None,
+            'centre_depot': {
+                'id': candidat.centre_depot.id,
+                'nom': candidat.centre_depot.nom
+            } if candidat.centre_depot else None,
+            
+            'etablissement_origine': candidat.etablissement_origine,
+            'annee_obtention_diplome': candidat.annee_obtention_diplome,
+            
+            # Statut
+            'statut_dossier': candidat.statut_dossier,
+            'motif_rejet': candidat.motif_rejet,
+            'date_validation': candidat.date_validation,
+            'date_rejet': candidat.date_rejet,
+            'valide_par': {
+                'nom': candidat.valide_par.get_full_name()
+            } if candidat.valide_par else None,
+            
+            'created_at': candidat.created_at,
+            'updated_at': candidat.updated_at
+        },
+        'dossier': {
+            'id': dossier.id,
+            'numero_dossier': dossier.numero_dossier,
+            'statut': dossier.statut,
+            'annee_scolaire': {
+                'id': dossier.annee_scolaire.id,
+                'libelle': dossier.annee_scolaire.libelle
+            } if dossier.annee_scolaire else None,
+            'date_soumission': dossier.date_soumission,
+            'date_validation': dossier.date_validation,
+            'created_at': dossier.created_at,
+            'updated_at': dossier.updated_at
+        } if dossier else None,
+        'documents': documents_data
+    }
+    
+    return Response(response_data, status=status.HTTP_200_OK)
 
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def notifications_view(request):
+    """Liste des notifications du candidat"""
+    try:
+        candidat = request.user.candidat
+    except Candidat.DoesNotExist:
+        return Response({
+            'error': 'Profil candidat non trouvé'
+        }, status=status.HTTP_404_NOT_FOUND)
+    
+    notifications = Notification.objects.filter(candidat=candidat).order_by('-created_at')
+    
+    notifications_data = [{
+        'id': notif.id,
+        'titre': notif.titre,
+        'message': notif.message,
+        'type': notif.type,
+        'is_read': notif.is_read,
+        'action_url': notif.action_url,
+        'action_label': notif.action_label,
+        'created_at': notif.created_at,
+        'read_at': notif.read_at
+    } for notif in notifications]
+    
+    return Response({
+        'notifications': notifications_data,
+        'total': len(notifications_data),
+        'unread': sum(1 for n in notifications_data if not n['is_read'])
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def mark_notification_read(request, notification_id):
+    """Marquer une notification comme lue"""
+    try:
+        candidat = request.user.candidat
+        notification = Notification.objects.get(id=notification_id, candidat=candidat)
+        
+        if not notification.is_read:
+            notification.is_read = True
+            notification.read_at = timezone.now()
+            notification.save()
+        
+        return Response({
+            'message': 'Notification marquée comme lue'
+        }, status=status.HTTP_200_OK)
+    
+    except Notification.DoesNotExist:
+        return Response({
+            'error': 'Notification non trouvée'
+        }, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def mark_all_notifications_read(request):
+    """Marquer toutes les notifications comme lues"""
+    try:
+        candidat = request.user.candidat
+        updated = Notification.objects.filter(
+            candidat=candidat, 
+            is_read=False
+        ).update(
+            is_read=True,
+            read_at=timezone.now()
+        )
+        
+        return Response({
+            'message': f'{updated} notification(s) marquée(s) comme lue(s)'
+        }, status=status.HTTP_200_OK)
+    
+    except Candidat.DoesNotExist:
+        return Response({
+            'error': 'Profil candidat non trouvé'
+        }, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def delete_notification(request, notification_id):
+    """Supprimer une notification"""
+    try:
+        candidat = request.user.candidat
+        notification = Notification.objects.get(id=notification_id, candidat=candidat)
+        notification.delete()
+        
+        return Response({
+            'message': 'Notification supprimée'
+        }, status=status.HTTP_200_OK)
+    
+    except Notification.DoesNotExist:
+        return Response({
+            'error': 'Notification non trouvée'
+        }, status=status.HTTP_404_NOT_FOUND)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_welcome_notification(request):
+    """Crée la notification d'accueil"""
+    candidat = request.user.candidat
+    create_notification(
+        candidat=candidat,
+        titre="🎓 Bienvenue dans votre espace notifications !",
+        message="""
+        🔔 Vous recevrez vos notifications importantes ici :
+        
+        ✅ Validation de votre dossier
+        💰 Confirmation de paiement  
+        📄 Statut des pièces justificatives
+        📅 Dates des concours       
+        """,              
+    )
+    return Response({"message": "Notification d'accueil créée !"}, status=201)
 class ResponsableFiliereViewSet(viewsets.ViewSet):
     """ViewSet pour les responsables de filière"""
     permission_classes = [IsAuthenticated, IsResponsableFiliere]
@@ -611,7 +1055,7 @@ class ResponsableFiliereViewSet(viewsets.ViewSet):
             print(f"   ✅ Candidat trouvé: {candidat.matricule}")
             print(f"   Statut: {candidat.statut_dossier}")
             
-            if candidat.statut_dossier != 'complet':
+            if candidat.statut_dossier != 'complet': 
                 print(f"   ❌ Statut invalide!")
                 return Response(
                     {'error': 'Le dossier doit être complet pour être validé'},
@@ -625,6 +1069,23 @@ class ResponsableFiliereViewSet(viewsets.ViewSet):
                 candidat.valide_par = user
             candidat.save()
             print("   ✅ Statut sauvegardé en BD")
+            
+            # ✅ CRÉER LA NOTIFICATION DE VALIDATION
+            print("4️⃣bis Création notification...")
+            try:
+                from candidats.utils.notifications import create_notification
+                
+                create_notification(
+                    candidat=candidat,
+                    titre="🎉 Dossier Validé !",
+                    message=f"Félicitations ! Votre dossier a été validé le {timezone.now().strftime('%d/%m/%Y à %H:%M')}. Vous pouvez maintenant télécharger votre convocation.",
+                    type='validation',
+                    action_url='/Mon-dossier',
+                    action_label='Voir mon dossier'
+                )
+                print("   ✅ Notification créée")
+            except Exception as notif_error:
+                print(f"   ⚠️ Erreur création notification: {notif_error}")
             
             print("5️⃣ DÉBUT GÉNÉRATION EMAIL...")
             try:
@@ -760,8 +1221,29 @@ class ResponsableFiliereViewSet(viewsets.ViewSet):
                 candidat.rejete_par = user
             candidat.save()
             
+            # ✅ CRÉER LA NOTIFICATION DE REJET
+            print("📢 Création notification de rejet...")
+            try:
+                from candidats.utils.notifications import create_notification
+                
+                create_notification(
+                    candidat=candidat,
+                    titre="❌ Dossier Non Validé",
+                    message=f"Votre dossier n'a pas pu être validé. Motif: {motif}. Vous pouvez le corriger et le soumettre à nouveau.",
+                    type='rejection',
+                    action_url='/Mon-dossier',
+                    action_label='Consulter mon dossier'
+                )
+                print("   ✅ Notification créée")
+            except Exception as notif_error:
+                print(f"   ⚠️ Erreur création notification: {notif_error}")
+            
             # Envoyer l'email
             try:
+                from django.template.loader import render_to_string
+                from django.core.mail import EmailMessage
+                from django.conf import settings
+                
                 context = {
                     'candidat': candidat,
                     'motif': motif,
@@ -775,16 +1257,12 @@ class ResponsableFiliereViewSet(viewsets.ViewSet):
                 
                 email = EmailMessage(
                     subject=f'📋 Notification concernant votre dossier - {candidat.filiere.libelle}',
-                    body='Votre dossier a été examiné. Veuillez consulter les détails ci-dessous.',
+                    body=html_message,
                     from_email=settings.DEFAULT_FROM_EMAIL,
                     to=[candidat.email],
                 )
                 
-                # Ajouter le HTML
                 email.content_subtype = "html"
-                email.body = html_message
-                
-                # Envoyer l'email
                 email.send(fail_silently=False)
                 
                 print(f"✅ Email de rejet envoyé à {candidat.email}")
@@ -810,6 +1288,389 @@ class ResponsableFiliereViewSet(viewsets.ViewSet):
                 {'error': 'Candidat non trouvé'},
                 status=status.HTTP_404_NOT_FOUND
             )
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+class AdminAcademiqueViewSet(viewsets.ViewSet):
+    """ViewSet pour l'administrateur académique"""
+    permission_classes = [IsAuthenticated, IsAdminAcademique]
+
+    @action(detail=False, methods=['get'], url_path='dashboard-stats')
+    def dashboard_stats(self, request):
+        """Statistiques du dashboard admin académique"""
+        try:
+            from configurations.models import Filiere
+            
+            candidats_total = Candidat.objects.count()
+            candidats_actifs = Candidat.objects.filter(user__is_active=True).count()
+            
+            dossiers_valides = Candidat.objects.filter(statut_dossier='valide').count()
+            dossiers_complets = Candidat.objects.filter(statut_dossier='complet').count()
+            dossiers_en_attente = Candidat.objects.filter(statut_dossier='en_attente').count()
+            dossiers_rejetes = Candidat.objects.filter(statut_dossier='rejete').count()
+            
+            responsables_filieres = User.objects.filter(
+                role='responsable_filiere',
+                is_active=True
+            ).count()
+            filieres_actives = Filiere.objects.filter(is_active=True).count()
+            
+            taux_validation = round(
+                (dossiers_valides / candidats_total * 100) if candidats_total > 0 else 0,
+                2
+            )
+            
+            semaine_debut = timezone.now() - timedelta(days=7)
+            candidats_nouveaux = Candidat.objects.filter(
+                created_at__gte=semaine_debut
+            ).count()
+
+            taux_rejet = round(
+                (dossiers_rejetes / candidats_total * 100) if candidats_total > 0 else 0,
+                2
+            )
+            
+            alertes = []
+            
+            filieres_pleines = Filiere.objects.annotate(
+                valides_count=Count('candidats', filter=Q(candidats__statut_dossier='valide'))
+            ).filter(
+                valides_count__gte=F('quota'),
+                is_active=True
+            )
+            
+            for filiere in filieres_pleines:
+                alertes.append(
+                    f"Filière {filiere.libelle} : quota atteint ({filiere.valides_count}/{filiere.quota})"
+                )
+            
+            old_pending = Candidat.objects.filter(
+                statut_dossier='en_attente',
+                created_at__lt=timezone.now() - timedelta(days=30)
+            ).count()
+            
+            if old_pending > 0:
+                alertes.append(f"{old_pending} dossiers en attente depuis plus de 30 jours")
+
+            stats = {
+                'candidats_total': candidats_total,
+                'candidats_actifs': candidats_actifs,
+                'candidats_nouveaux': candidats_nouveaux, 
+                'dossiers_valides': dossiers_valides,
+                'dossiers_complets': dossiers_complets,
+                'dossiers_en_attente': dossiers_en_attente,
+                'dossiers_rejetes': dossiers_rejetes,
+                'responsables_filieres': responsables_filieres,
+                'filieres_actives': filieres_actives,
+                'taux_validation': taux_validation,
+                'taux_rejet': taux_rejet,
+                'alertes': alertes,
+            }
+            
+            return Response(stats)
+            
+        except Exception as e:
+            print(f"❌ Erreur dashboard stats: {e}")
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=['get'], url_path='stats-filieres')
+    def stats_filieres(self, request):
+        """Statistiques détaillées par filière"""
+        try:
+            from configurations.models import Filiere
+            
+            filieres = Filiere.objects.all()
+            stats = []
+            
+            for filiere in filieres:
+                candidats = Candidat.objects.filter(filiere=filiere)
+                
+                responsable_info = None
+                try:
+                    resp_user = User.objects.filter(
+                        role='responsable_filiere',
+                        responsable_filiere_profile__filiere=filiere
+                    ).first()
+                    
+                    if resp_user:
+                        responsable_info = {
+                            'nom': resp_user.nom,
+                            'prenom': resp_user.prenom,
+                            'email': resp_user.email
+                        }
+                except Exception:
+                    responsable_info = None
+                
+                stats.append({
+                    'id': filiere.id,
+                    'code': filiere.code,
+                    'libelle': filiere.libelle,
+                    'total': candidats.count(),
+                    'valides': candidats.filter(statut_dossier='valide').count(),
+                    'en_attente': candidats.filter(statut_dossier__in=['en_attente', 'complet']).count(),
+                    'rejetes': candidats.filter(statut_dossier='rejete').count(),
+                    'quota': getattr(filiere, 'quota', 100),
+                    'responsable': responsable_info,
+                    'is_active': filiere.is_active,
+                })
+            
+            return Response(stats)
+            
+        except Exception as e:
+            print(f"❌ Erreur stats filières: {e}")
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=['get'], url_path='filieres-responsables')
+    def filieres_responsables(self, request):
+        """Liste des filières avec leurs responsables et statistiques"""
+        try:
+            from configurations.models import Filiere
+            
+            filiere_id = request.query_params.get('filiere_id')
+            is_active = request.query_params.get('is_active')
+            
+            filieres_query = Filiere.objects.all()
+            
+            if filiere_id:
+                filieres_query = filieres_query.filter(id=filiere_id)
+            if is_active is not None:
+                is_active_bool = is_active.lower() == 'true'
+                filieres_query = filieres_query.filter(is_active=is_active_bool)
+            
+            data = []
+            
+            for filiere in filieres_query:
+                responsable_info = None
+                try:
+                    resp_user = User.objects.filter(
+                        role='responsable_filiere',
+                        responsable_filiere_profile__filiere=filiere,
+                        is_active=True
+                    ).first()
+                    
+                    if resp_user:
+                        responsable_info = {
+                            'id': resp_user.id,
+                            'nom': resp_user.nom,
+                            'prenom': resp_user.prenom,
+                            'email': resp_user.email,
+                            'telephone': getattr(resp_user.responsable_filiere_profile, 'telephone', ''),
+                        }
+                except Exception as e:
+                    print(f"Erreur récupération responsable pour filière {filiere.id}: {e}")
+                    responsable_info = None
+                
+                candidats = Candidat.objects.filter(filiere=filiere)
+                total = candidats.count()
+                valides = candidats.filter(statut_dossier='valide').count()
+                en_attente = candidats.filter(statut_dossier__in=['en_attente', 'complet']).count()
+                rejetes = candidats.filter(statut_dossier='rejete').count()
+                
+                status_val = 'active' if filiere.is_active else 'inactive'
+                
+                data.append({
+                    'id': filiere.id,
+                    'code': filiere.code,
+                    'libelle': filiere.libelle,
+                    'quota': getattr(filiere, 'quota', 100),
+                    'status': status_val,
+                    'is_active': filiere.is_active,
+                    'responsable': responsable_info,
+                    'total': total,
+                    'valides': valides,
+                    'en_attente': en_attente,
+                    'rejetes': rejetes,
+                    'created_at': filiere.created_at if hasattr(filiere, 'created_at') else None,
+                })
+            
+            return Response(data)
+            
+        except Exception as e:
+            print(f"❌ Erreur filieres_responsables: {e}")
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=['get'], url_path='utilisateurs')
+    def get_users(self, request):
+        """Liste tous les utilisateurs avec filtres"""
+        try:
+            print("📋 Chargement utilisateurs...")
+            
+            role = request.query_params.get('role')
+            is_active = request.query_params.get('is_active')
+            
+            users = User.objects.all().order_by('-created_at')
+            
+            if role:
+                users = users.filter(role=role)
+            if is_active is not None:
+                is_active_bool = is_active.lower() == 'true'
+                users = users.filter(is_active=is_active_bool)
+            
+            data = []
+            for user in users:
+                data.append({
+                    'id': user.id,
+                    'nom': user.nom,
+                    'prenom': user.prenom,
+                    'email': user.email,
+                    'role': user.role,
+                    'is_active': user.is_active,
+                    'created_at': user.created_at.isoformat() if user.created_at else None,
+                })
+            
+            print(f"✅ {len(data)} utilisateurs trouvés")
+            return Response(data)
+            
+        except Exception as e:
+            print(f"❌ Erreur get_users: {e}")
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=['get'], url_path='export-users')
+    def export_users(self, request):
+        """Export Excel de tous les utilisateurs"""
+        try:
+            print("📥 Export utilisateurs Excel demandé")
+            
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment
+            
+            # Créer le workbook
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Utilisateurs"
+            
+            # Style pour l'en-tête
+            header_fill = PatternFill(start_color="4F46E5", end_color="4F46E5", fill_type="solid")
+            header_font = Font(bold=True, color="FFFFFF", size=12)
+            
+            # En-têtes
+            headers = ['ID', 'Nom', 'Prénom', 'Email', 'Rôle', 'Actif', 'Date création']
+            ws.append(headers)
+            
+            # Appliquer le style à l'en-tête
+            for cell in ws[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+            
+            # Récupérer et ajouter les données
+            users = User.objects.all().order_by('-created_at')
+            
+            for user in users:
+                ws.append([
+                    user.id,
+                    user.nom,
+                    user.prenom,
+                    user.email,
+                    user.get_role_display(),
+                    'Oui' if user.is_active else 'Non',
+                    user.created_at.strftime('%Y-%m-%d %H:%M') if user.created_at else 'N/A'
+                ])
+            
+            # Ajuster la largeur des colonnes
+            for column in ws.columns:
+                max_length = 0
+                column_letter = column[0].column_letter
+                for cell in column:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(cell.value)
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 50)
+                ws.column_dimensions[column_letter].width = adjusted_width
+            
+            # Créer la réponse HTTP
+            response = HttpResponse(
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            response['Content-Disposition'] = f'attachment; filename="utilisateurs_{timezone.now().strftime("%Y%m%d_%H%M%S")}.xlsx"'
+            
+            # Sauvegarder dans la réponse
+            wb.save(response)
+            
+            print(f"✅ Export Excel de {users.count()} utilisateurs")
+            return response
+            
+        except Exception as e:
+            print(f"❌ Erreur export_users: {e}")
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=['get'], url_path='export-stats')
+    def export_stats(self, request):
+        """Exporter les statistiques globales en CSV"""
+        try:
+            from configurations.models import Filiere
+            
+            response = HttpResponse(content_type='text/csv; charset=utf-8-sig')
+            response['Content-Disposition'] = f'attachment; filename="statistiques_globales_{timezone.now().date()}.csv"'
+            
+            response.write('\ufeff')
+            writer = csv.writer(response)
+            
+            writer.writerow(['STATISTIQUES GLOBALES - ADMIN ACADÉMIQUE'])
+            writer.writerow(['Date export', timezone.now().strftime('%d/%m/%Y %H:%M')])
+            writer.writerow([])
+            
+            writer.writerow(['=== VUE ENSEMBLE ==='])
+            writer.writerow(['Métrique', 'Valeur'])
+            
+            candidats_total = Candidat.objects.count()
+            writer.writerow(['Total candidats', candidats_total])
+            writer.writerow(['Dossiers validés', Candidat.objects.filter(statut_dossier='valide').count()])
+            writer.writerow(['Dossiers en attente', Candidat.objects.filter(statut_dossier='en_attente').count()])
+            writer.writerow(['Dossiers rejetés', Candidat.objects.filter(statut_dossier='rejete').count()])
+            writer.writerow(['Responsables actifs', User.objects.filter(role='responsable_filiere', is_active=True).count()])
+            writer.writerow(['Filières actives', Filiere.objects.filter(is_active=True).count()])
+            writer.writerow([])
+            
+            writer.writerow(['=== PAR FILIÈRE ==='])
+            writer.writerow(['Filière', 'Code', 'Total', 'Validés', 'En attente', 'Rejetés', 'Quota'])
+            
+            for filiere in Filiere.objects.all():
+                candidats = Candidat.objects.filter(filiere=filiere)
+                writer.writerow([
+                    filiere.libelle,
+                    filiere.code,
+                    candidats.count(),
+                    candidats.filter(statut_dossier='valide').count(),
+                    candidats.filter(statut_dossier='en_attente').count(),
+                    candidats.filter(statut_dossier='rejete').count(),
+                    getattr(filiere, 'quota', 'N/A')
+                ])
+            
+            return response
+            
         except Exception as e:
             import traceback
             traceback.print_exc()

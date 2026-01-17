@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from authentication.models import CodeQuitus
+from authentication.models import CodeQuitus,User
 from .models import Candidat, Dossier, Document, Region, Departement
 from django.utils import timezone
 from django.core.files.storage import default_storage
@@ -330,3 +330,17 @@ class DossierValidationSerializer(serializers.Serializer):
     """Serializer pour valider/rejeter un dossier"""
     motif = serializers.CharField(required=False, allow_blank=True)
     action = serializers.ChoiceField(choices=['valider', 'rejeter'])
+
+class UserListSerializer(serializers.ModelSerializer):
+    telephone = serializers.CharField(
+        source='responsable_filiere_profile.telephone', 
+        required=False, 
+        allow_null=True
+    )
+    
+    class Meta:
+        model = User
+        fields = [
+            'id', 'nom', 'prenom', 'email', 'role', 
+            'is_active', 'created_at', 'telephone'
+        ]

@@ -53,7 +53,8 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.authentication import SessionAuthentication
 
 @api_view(['POST'])
-@permission_classes([AllowAny])  # ✅ Autorise tout le monde (connecté ou non)
+@authentication_classes([])  # ✅ Désactive TOUTE authentification
+@permission_classes([AllowAny])  # ✅ Autorise tout le monde
 def verify_quitus_view(request):
     """
     Vérifier un code quitus.
@@ -62,22 +63,33 @@ def verify_quitus_view(request):
     - Si utilisé par un autre -> error avec action: "login_required"
     """
     
-    # 🔥 AUTHENTIFICATION MANUELLE OPTIONNELLE
-    jwt_auth = JWTAuthentication()
-    try:
-        auth_result = jwt_auth.authenticate(request)
-        if auth_result is not None:
-            request.user, _ = auth_result
-    except Exception:
-        pass  # Si pas de token ou token invalide, on continue avec AnonymousUser
-    
     print("\n" + "="*80)
     print("🔍 VERIFY QUITUS - DEBUG")
     print("="*80)
     
+    # 🔥 DEBUG: Afficher TOUS les headers reçus
+    print("📨 HEADERS REÇUS:")
+    for key, value in request.headers.items():
+        if 'auth' in key.lower() or 'token' in key.lower():
+            print(f"   🔑 {key}: {value[:50]}..." if len(value) > 50 else f"   🔑 {key}: {value}")
+        else:
+            print(f"   📄 {key}: {value[:50]}..." if len(value) > 50 else f"   📄 {key}: {value}")
+    
+    # 🔥 AUTHENTIFICATION MANUELLE OPTIONNELLE
+    jwt_auth = JWTAuthentication()
+    authenticated_user = None
+    
+    try:
+        auth_result = jwt_auth.authenticate(request)
+        if auth_result is not None:
+            authenticated_user, _ = auth_result
+            print(f"✅ Token JWT décodé avec succès")
+    except Exception as e:
+        print(f"⚠️ Erreur authentification JWT: {type(e).__name__}: {e}")
+    
     code_quitus = request.data.get('code_quitus')
     print(f"📝 Code reçu: {code_quitus}")
-    print(f"👤 User: {request.user} (is_authenticated: {request.user.is_authenticated})")
+    print(f"👤 User authentifié: {authenticated_user}")
     
     # Validation du code
     if not code_quitus:
@@ -117,14 +129,14 @@ def verify_quitus_view(request):
             'message': 'Code quitus valide et disponible',
             'montant': str(quitus.montant),
             'reference_bancaire': quitus.reference_bancaire,
-            'date_expiration': quitus.date_expiration.isoformat(),
+            'date_expiration': quitus.date_expiration.isoformat() if quitus.date_expiration else None,
         }, status=status.HTTP_200_OK)
     
     # CAS 2 & 3 : CODE DÉJÀ UTILISÉ
     print(f"⚠️ Code déjà utilisé par user_id: {quitus.utilisateur_id}")
     
     # Vérifier si l'utilisateur est connecté
-    if not request.user.is_authenticated:
+    if not authenticated_user:
         print("❌ User non connecté → login_required")
         return Response({
             'error': 'Ce code est déjà utilisé. Veuillez vous connecter si c\'est votre code.',
@@ -132,7 +144,7 @@ def verify_quitus_view(request):
         }, status=status.HTTP_400_BAD_REQUEST)
     
     # Vérifier si c'est le propriétaire du code
-    if quitus.utilisateur_id == request.user.id:
+    if quitus.utilisateur_id == authenticated_user.id:
         print("✅ STATUS: OWNED (code appartient à l'utilisateur connecté)")
         return Response({
             'status': 'owned',
@@ -185,7 +197,7 @@ def profile_view(request):
 
 # authentication/views.py
 
-# Après verify_quitus_view, ajoutez :
+
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
